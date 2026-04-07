@@ -10,7 +10,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 
 """
-DSCP Traffic Analyzer - high-performance, cross-platform
+DSCP-TOP Traffic Analyzer - high-performance, cross-platform
   Linux : AF_PACKET raw socket (reliable, ~50k pps)
   IPv4 + IPv6 supported
   macOS : scapy L2socket + direct recv() loop  (no sniff() overhead)
@@ -25,9 +25,9 @@ Dependencies:
   macOS : pip install scapy
 
 Usage:
-  sudo python3 dscp_analyzer.py <interface> [-i SECONDS] [-d in|out|both]
-  sudo python3 dscp_analyzer.py eth0 -i 2 -d in
-  sudo python3 dscp_analyzer.py en7  -i 1 -d out
+  sudo python3 dscp-top.py <interface> [-i SECONDS] [-d in|out|both]
+  sudo python3 dscp-top.py eth0 -i 2 -d in
+  sudo python3 dscp-top.py en7  -i 1 -d out
 """
 
 import argparse
@@ -297,7 +297,7 @@ def draw_ui(stdscr, iface: str, interval: float,
         s    = _snap
 
         stdscr.addstr(row, 0,
-            f" DSCP Analyzer  iface: {iface}  interval: {interval}s  direction: ",
+            f" DSCP-TOP  iface: {iface}  interval: {interval}s  direction: ",
             curses.color_pair(1) | curses.A_BOLD)
         stdscr.addstr(direction.upper(),
             curses.color_pair(dir_cpair) | curses.A_BOLD)
@@ -391,7 +391,7 @@ def main() -> None:
     global _backend
 
     parser = argparse.ArgumentParser(
-        description="DSCP Traffic Analyzer",
+        description="DSCP-TOP Traffic Analyzer",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("interface", help="Network interface (e.g. eth0, en7)")
