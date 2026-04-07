@@ -44,7 +44,7 @@ import curses
 import signal
 from collections import defaultdict
 
-VERSION="0.21"
+VERSION="0.22"
 
 # Suppress scapy warnings before any scapy import (avoids curses corruption)
 logging.getLogger("scapy").setLevel(logging.CRITICAL)
