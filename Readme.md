@@ -19,6 +19,23 @@ cd dscp-top
 chmod +x dscp-top.py
 ```
 
+## Requirements
+
+### Linux
+No additional packages required (uses stdlib only).
+
+```bash
+# Python 3.9+ required
+python3 --version
+```
+
+### macOS
+```bash
+pip install scapy
+```
+
+---
+
 ## Features
 
 - Live per-DSCP statistics: packet count, bitrate (kbit/s / Mbit/s), percentage
@@ -44,22 +61,7 @@ chmod +x dscp-top.py
 
 ---
 
-## Requirements
 
-### Linux
-No additional packages required (uses stdlib only).
-
-```bash
-# Python 3.9+ required
-python3 --version
-```
-
-### macOS
-```bash
-pip install scapy
-```
-
----
 
 
 ---

@@ -44,7 +44,7 @@ import curses
 import signal
 from collections import defaultdict
 
-VERSION="0.22"
+VERSION="0.24"
 
 # Suppress scapy warnings before any scapy import (avoids curses corruption)
 logging.getLogger("scapy").setLevel(logging.CRITICAL)
@@ -74,6 +74,7 @@ _total_bytes: int = 0
 _snap:        dict = {}
 _running:     bool = True
 _backend:     str  = ""
+_L2bpfSocket         = None   # set at startup on macOS
 
 
 def _account(dscp: int, size: int) -> None:
@@ -178,25 +179,13 @@ def _get_mac_macos(iface: str) -> str:
 
 
 def capture_macos(iface: str, direction: str, iface_mac: str) -> None:
-    import io
-    # Redirect stderr during scapy import + socket open to suppress BPF warnings
+    import contextlib
+    # _L2bpfSocket is imported once at startup in main() — guaranteed available here
+    mac_bytes = bytes(int(x, 16) for x in iface_mac.split(":"))
     _devnull = open(os.devnull, "w")
     try:
-        import contextlib
         with contextlib.redirect_stderr(_devnull):
-            from scapy.arch.bpf.supersocket import L2bpfSocket
-            from scapy.config import conf as scapy_conf
-            scapy_conf.verb = 0
-    except ImportError:
-        print("ERROR: scapy not installed. Run: pip install scapy",
-              file=sys.stderr)
-        _stop(); return
-
-    mac_bytes = bytes(int(x, 16) for x in iface_mac.split(":"))
-
-    try:
-        with contextlib.redirect_stderr(_devnull):
-            sock = L2bpfSocket(iface=iface, promisc=True)
+            sock = _L2bpfSocket(iface=iface, promisc=True)
     except Exception as e:
         print(f"\nL2bpfSocket error: {e}", file=sys.stderr)
         _stop(); return
@@ -416,6 +405,22 @@ def main() -> None:
 
     elif platform == "darwin":
         _backend = "scapy/L2bpf"
+        # Import scapy once at startup — hard fail with clear message if missing
+        global _L2bpfSocket
+        try:
+            import contextlib, io
+            with contextlib.redirect_stderr(open(os.devnull, "w")):
+                from scapy.arch.bpf.supersocket import L2bpfSocket as _L2bpfSocket
+                from scapy.config import conf as _scapy_conf
+                _scapy_conf.verb = 0
+        except ImportError:
+            print("ERROR: scapy is not installed.")
+            print("       Install it with:  pip install scapy")
+            print("       Then re-run dscp-top.")
+            sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: scapy import failed: {e}")
+            sys.exit(1)
         try:
             iface_mac = _get_mac_macos(args.interface)
         except Exception as e:
