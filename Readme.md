@@ -6,6 +6,19 @@
 
 ---
 
+## Installation / Update 
+
+```
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ewaldj/dscp-top/refs/heads/main/e-install.sh)"
+```
+or 
+
+```bash
+git clone https://github.com/youruser/dscp-top.git
+cd dscp-top
+chmod +x dscp-top.py
+```
+
 ## Features
 
 - Live per-DSCP statistics: packet count, bitrate (kbit/s / Mbit/s), percentage
@@ -48,17 +61,6 @@ pip install scapy
 
 ---
 
-## Installation
-
-```
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ewaldj/dscp-top/refs/heads/main/e-install.sh)"
-```
-
-```bash
-git clone https://github.com/youruser/dscp-top.git
-cd dscp-top
-chmod +x dscp-top.py
-```
 
 ---
 
