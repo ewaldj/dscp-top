@@ -44,7 +44,7 @@ import curses
 import signal
 from collections import defaultdict
 
-VERSION="0.24"
+VERSION="0.41"
 
 # Suppress scapy warnings before any scapy import (avoids curses corruption)
 logging.getLogger("scapy").setLevel(logging.CRITICAL)
@@ -67,27 +67,25 @@ DSCP_ORDER: list[int] = [0, 8, 10, 12, 14, 16, 18, 20, 22, 24,
 _lock         = threading.Lock()
 _pkt_count:   dict[int, int] = defaultdict(int)
 _byte_count:  dict[int, int] = defaultdict(int)
-_other_pkts:  int = 0
-_other_bytes: int = 0
 _total_pkts:  int = 0
 _total_bytes: int = 0
 _snap:        dict = {}
 _running:     bool = True
+_used_only:   bool = False   # show only DSCP values with traffic
+_reset_flag:  bool = False    # signals snapshot_loop to clear prev counters
+_start_time:  float = 0.0        # set at capture start
 _backend:     str  = ""
 _L2bpfSocket         = None   # set at startup on macOS
 
 
 def _account(dscp: int, size: int) -> None:
-    global _other_pkts, _other_bytes, _total_pkts, _total_bytes
+    global _total_pkts, _total_bytes
     with _lock:
         _total_pkts  += 1
         _total_bytes += size
-        if dscp in DSCP_MAP:
-            _pkt_count[dscp]  += 1
-            _byte_count[dscp] += size
-        else:
-            _other_pkts  += 1
-            _other_bytes += size
+        # Both known and unknown DSCP tracked per-value
+        _pkt_count[dscp]  += 1
+        _byte_count[dscp] += size
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -218,38 +216,52 @@ def capture_macos(iface: str, direction: str, iface_mac: str) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def snapshot_loop(interval: float) -> None:
     global _snap
-    prev_tp = prev_tb = prev_op = prev_ob = 0
+    prev_tp = prev_tb = 0
     prev_dp: dict[int, int] = defaultdict(int)
     prev_db: dict[int, int] = defaultdict(int)
 
     while _running:
         time.sleep(interval)
+        global _reset_flag
+        if _reset_flag:
+            prev_tp = prev_tb = 0
+            prev_dp = defaultdict(int)
+            prev_db = defaultdict(int)
+            _reset_flag = False
         with _lock:
             cur_tp = _total_pkts;  cur_tb = _total_bytes
             cur_dp = dict(_pkt_count); cur_db = dict(_byte_count)
-            cur_op = _other_pkts;  cur_ob = _other_bytes
 
         d_tp = cur_tp - prev_tp;  d_tb = cur_tb - prev_tb
+
+        # Split known DSCP values from unknown ones
+        all_dscp  = set(cur_dp.keys())
+        known     = set(DSCP_ORDER)
+        unknown   = sorted(all_dscp - known)
+
         dscp_dp = {d: cur_dp.get(d,0) - prev_dp.get(d,0) for d in DSCP_ORDER}
         dscp_db = {d: cur_db.get(d,0) - prev_db.get(d,0) for d in DSCP_ORDER}
-        d_op = cur_op - prev_op;  d_ob = cur_ob - prev_ob
+        unk_dp  = {d: cur_dp.get(d,0) - prev_dp.get(d,0) for d in unknown}
+        unk_db  = {d: cur_db.get(d,0) - prev_db.get(d,0) for d in unknown}
 
         _snap = {
-            "total_pkts":       cur_tp,
-            "total_bytes":      cur_tb,
-            "delta_total_pkts": d_tp,
-            "pps":              int(d_tp / interval),
-            "bps":              int(d_tb * 8 / interval),
-            "dscp_total_pkts":  cur_dp,       # cumulative since start
-            "dscp_delta_pkts":  dscp_dp,
-            "dscp_delta_bytes": dscp_db,
-            "other_total_pkts": cur_op,       # cumulative since start
-            "other_delta_pkts": d_op,
-            "other_delta_bps":  int(d_ob * 8 / interval),
+            "total_pkts":        cur_tp,
+            "total_bytes":       cur_tb,
+            "delta_total_pkts":  d_tp,
+            "pps":               int(d_tp / interval),
+            "bps":               int(d_tb * 8 / interval),
+            "dscp_total_pkts":   cur_dp,       # cumulative since start
+            "dscp_total_bytes":  cur_db,       # cumulative bytes since start
+            "dscp_delta_pkts":   dscp_dp,
+            "dscp_delta_bytes":  dscp_db,
+            "unknown_dscp":      unknown,
+            "unk_total_pkts":    cur_dp,
+            "unk_total_bytes":   cur_db,
+            "unk_delta_pkts":    unk_dp,
+            "unk_delta_bytes":   unk_db,
         }
         prev_tp = cur_tp; prev_tb = cur_tb
         prev_dp = cur_dp; prev_db = cur_db
-        prev_op = cur_op; prev_ob = cur_ob
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -266,6 +278,14 @@ def _fmt_rate(bps: int) -> str:
 
 def draw_ui(stdscr, iface: str, interval: float,
             direction: str, iface_mac: str) -> None:
+
+    def S(*args, **kwargs):
+        """Safe stdscr.addstr — ignore curses errors (terminal too small etc.)."""
+        try:
+            stdscr.addstr(*args, **kwargs)
+        except curses.error:
+            pass
+
     curses.curs_set(0)
     stdscr.nodelay(True)
     curses.start_color()
@@ -275,83 +295,125 @@ def draw_ui(stdscr, iface: str, interval: float,
     curses.init_pair(3, curses.COLOR_YELLOW, -1)
     curses.init_pair(4, curses.COLOR_RED,    -1)
     curses.init_pair(5, curses.COLOR_WHITE,  -1)
+    if curses.can_change_color() and curses.COLORS >= 256:
+        curses.init_color(16, 1000, 500, 0)   # RGB orange
+        curses.init_pair(6, 16, -1)
+    else:
+        curses.init_pair(6, curses.COLOR_YELLOW, -1)
 
     BAR_WIDTH = 20
+    BAR_END   = 96   # prefix(76) + bar(20)
     dir_cpair = _DIR_COLOR.get(direction, 1)
+    MIN_W, MIN_H = 80, 10
 
     while _running:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        row  = 0
-        s    = _snap
 
-        stdscr.addstr(row, 0,
-            f" DSCP-TOP  iface: {iface}  interval: {interval}s  direction: ",
-            curses.color_pair(1) | curses.A_BOLD)
-        stdscr.addstr(direction.upper(),
-            curses.color_pair(dir_cpair) | curses.A_BOLD)
-        stdscr.addstr(
-            f"  backend: {_backend}  MAC: {iface_mac}  {time.strftime('%H:%M:%S')} ",
-            curses.color_pair(1) | curses.A_BOLD)
+        if w < MIN_W or h < MIN_H:
+            S(0, 0,
+              f" Terminal too small ({w}x{h}) — minimum {MIN_W}x{MIN_H} "[:w],
+              curses.color_pair(4) | curses.A_BOLD)
+            stdscr.refresh()
+            time.sleep(0.2)
+            continue
+
+        row = 0
+        s   = _snap
+
+        # ── Header ──
+        elapsed  = int(time.time() - _start_time)
+        runtime  = f"{elapsed//3600:02d}:{(elapsed%3600)//60:02d}:{elapsed%60:02d}"
+        h1_left  = f" DSCP-TOP   iface: {iface}  interval: {interval}s  direction: "
+        h1_dir   = direction.upper()
+        h1_right = f"  uptime: {runtime}"
+        h1_pad   = " " * max(2, BAR_END - len(h1_left) - len(h1_dir) - len(h1_right))
+        S(row, 0, h1_left, curses.color_pair(1) | curses.A_BOLD)
+        S(h1_dir, curses.color_pair(dir_cpair) | curses.A_BOLD)
+        S(h1_pad + h1_right, curses.color_pair(1) | curses.A_BOLD)
         row += 1
 
-        stdscr.addstr(row, 0,
+        # ── Totals ──
+        S(row, 0,
             f" Total pkts: {s.get('total_pkts',0):>12,}  "
             f"Total bytes: {s.get('total_bytes',0):>14,}  "
             f"PPS: {s.get('pps',0):>8,}  "
             f"Rate: {_fmt_rate(s.get('bps',0))}",
             curses.color_pair(5))
         row += 1
-        stdscr.addstr(row, 0, "─" * (w - 1), curses.color_pair(5))
+        S(row, 0, "─" * (w - 1), curses.color_pair(5))
         row += 1
 
-        stdscr.addstr(row, 0,
-            f"  {'DSCP':<6} {'Label':<8} "
-            f"{'Pkts':>12}  {f'Rate/{interval}s':>15}  {'%':>7}  Bar",
+        # ── Column headers ──
+        S(row, 0,
+            f"  {'DSCP':<6} {'Label':<9} "
+            f"{'Pkts':>12}  {'Bytes':>14}  {f'Rate/{interval}s':>15}  {'%':>7}  Bar",
             curses.color_pair(1))
         row += 1
-        stdscr.addstr(row, 0, "─" * (w - 1), curses.color_pair(5))
+        S(row, 0, "─" * (w - 1), curses.color_pair(5))
         row += 1
 
-        delta_total  = s.get("delta_total_pkts", 0)
-        dscp_tot_p   = s.get("dscp_total_pkts",  {})
-        dscp_dp      = s.get("dscp_delta_pkts",  {})
-        dscp_db      = s.get("dscp_delta_bytes",  {})
+        # ── DSCP rows ──
+        delta_total = s.get("delta_total_pkts", 0)
+        dscp_tot_p  = s.get("dscp_total_pkts",  {})
+        dscp_tot_b  = s.get("dscp_total_bytes",  {})
+        dscp_dp     = s.get("dscp_delta_pkts",   {})
+        dscp_db     = s.get("dscp_delta_bytes",  {})
 
         for dscp in DSCP_ORDER:
             if row >= h - 4:
                 break
-            tot_pkts = dscp_tot_p.get(dscp, 0)   # absolute since start
-            d_pkts   = dscp_dp.get(dscp, 0)       # delta for % / bar
-            d_bytes  = dscp_db.get(dscp, 0)
-            bps_row  = int(d_bytes * 8 / interval) if interval > 0 else 0
-            pct      = (d_pkts / delta_total * 100.0) if delta_total > 0 else 0.0
-            filled   = int(pct / 100.0 * BAR_WIDTH)
-            bar      = "█" * filled + "░" * (BAR_WIDTH - filled)
-            stdscr.addstr(row, 0,
-                f"  {dscp:<6} {DSCP_MAP[dscp]:<8} "
-                f"{tot_pkts:>12,}  {_fmt_rate(bps_row)}  {pct:>7.2f}%  ",
+            tot_pkts  = dscp_tot_p.get(dscp, 0)
+            tot_bytes = dscp_tot_b.get(dscp, 0)
+            d_pkts    = dscp_dp.get(dscp, 0)
+            if _used_only and tot_pkts == 0:
+                continue
+            d_bytes = dscp_db.get(dscp, 0)
+            bps_row = int(d_bytes * 8 / interval) if interval > 0 else 0
+            pct     = (d_pkts / delta_total * 100.0) if delta_total > 0 else 0.0
+            filled  = int(pct / 100.0 * BAR_WIDTH)
+            bar     = "█" * filled + "░" * (BAR_WIDTH - filled)
+            S(row, 0,
+                f"  {dscp:<6} {DSCP_MAP[dscp]:<9} "
+                f"{tot_pkts:>12,}  {tot_bytes:>14,}  {_fmt_rate(bps_row)}  {pct:>7.2f}%  ",
                 curses.color_pair(2))
-            stdscr.addstr(bar, curses.color_pair(3))
+            S(bar, curses.color_pair(3))
             row += 1
 
-        if row < h - 4:
-            o_p   = s.get("other_total_pkts", 0)   # absolute since start
-            o_dp  = s.get("other_delta_pkts", 0)
-            o_bps = s.get("other_delta_bps",  0)
-            o_pct = (o_dp / delta_total * 100.0) if delta_total > 0 else 0.0
-            filled = int(o_pct / 100.0 * BAR_WIDTH)
+        # ── UNDEFINED rows (orange) ──
+        unknown_list = s.get("unknown_dscp",    [])
+        unk_tot_p    = s.get("unk_total_pkts",  {})
+        unk_tot_b    = s.get("unk_total_bytes", {})
+        unk_dp       = s.get("unk_delta_pkts",  {})
+        unk_db       = s.get("unk_delta_bytes", {})
+        for u_dscp in unknown_list:
+            if row >= h - 4:
+                break
+            u_tot  = unk_tot_p.get(u_dscp, 0)
+            u_tob  = unk_tot_b.get(u_dscp, 0)
+            u_dp   = unk_dp.get(u_dscp, 0)
+            u_db   = unk_db.get(u_dscp, 0)
+            u_bps  = int(u_db * 8 / interval) if interval > 0 else 0
+            u_pct  = (u_dp / delta_total * 100.0) if delta_total > 0 else 0.0
+            filled = int(u_pct / 100.0 * BAR_WIDTH)
             bar    = "█" * filled + "░" * (BAR_WIDTH - filled)
-            stdscr.addstr(row, 0,
-                f"  {'?':<6} {'OTHER':<8} "
-                f"{o_p:>12,}  {_fmt_rate(o_bps)}  {o_pct:>7.2f}%  ",
-                curses.color_pair(4))
-            stdscr.addstr(bar, curses.color_pair(4))
+            S(row, 0,
+                f"  {u_dscp:<6} {'UNDEFINED':<9} "
+                f"{u_tot:>12,}  {u_tob:>14,}  {_fmt_rate(u_bps)}  {u_pct:>7.2f}%  ",
+                curses.color_pair(6))
+            S(bar, curses.color_pair(6))
             row += 1
 
-        stdscr.addstr(h - 2, 0, "─" * (w - 1), curses.color_pair(5))
-        stdscr.addstr(h - 1, 0, " 'q' quit  |  'r' reset counters                            | by Ewald Jeitler",
-                      curses.color_pair(5))
+        # ── Footer ──
+        S(h - 2, 0, "─" * (w - 1), curses.color_pair(5))
+        right = f"Version {VERSION}  by Ewald Jeitler"
+        left1 = " 'q' quit  |  'r' reset  |  "
+        left2 = "'u' used-only"
+        pad   = " " * max(1, BAR_END - len(left1) - len(left2) - len(right) - 2)
+        S(h - 1, 0, left1, curses.color_pair(5))
+        S(h - 1, len(left1), left2,
+          curses.color_pair(1) | curses.A_BOLD if _used_only else curses.color_pair(5))
+        S(h - 1, len(left1) + len(left2), pad + "| " + right, curses.color_pair(5))
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -359,15 +421,23 @@ def draw_ui(stdscr, iface: str, interval: float,
             _stop(); break
         elif key in (ord('r'), ord('R')):
             _reset()
+        elif key in (ord('u'), ord('U')):
+            _toggle_used_only()
         time.sleep(0.1)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _reset() -> None:
-    global _other_pkts, _other_bytes, _total_pkts, _total_bytes
+    global _total_pkts, _total_bytes, _reset_flag
     with _lock:
         _pkt_count.clear(); _byte_count.clear()
-        _other_pkts = _other_bytes = _total_pkts = _total_bytes = 0
+        _total_pkts = _total_bytes = 0
+    _reset_flag = True   # tell snapshot_loop to zero prev counters next tick
+
+
+def _toggle_used_only() -> None:
+    global _used_only
+    _used_only = not _used_only
 
 
 def _stop() -> None:
@@ -376,6 +446,90 @@ def _stop() -> None:
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
+def _default_iface() -> str:
+    """
+    Return interface with default gateway, or first interface with an IPv4
+    address as fallback. Raises RuntimeError if nothing found.
+    """
+    import socket as _socket
+
+    # Try: parse routing table for default gateway interface
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/net/route") as f:
+                for line in f.readlines()[1:]:
+                    fields = line.split()
+                    # Destination==00000000 means default route
+                    if fields[1] == "00000000":
+                        return fields[0]
+        except Exception:
+            pass
+
+    elif sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["route", "-n", "get", "default"], text=True, stderr=subprocess.DEVNULL)
+            for line in out.splitlines():
+                line = line.strip()
+                if line.startswith("interface:"):
+                    return line.split()[-1]
+        except Exception:
+            pass
+
+    # Fallback: first interface with an IPv4 address (skip loopback)
+    try:
+        import socket as _socket
+        ifaces = subprocess.check_output(
+            ["ip", "route"] if sys.platform.startswith("linux") else ["ifconfig"],
+            text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    # Generic fallback via getaddrinfo trick
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        # Find interface with this IP
+        if sys.platform.startswith("linux"):
+            import fcntl, struct, array
+            SIOCGIFCONF = 0x8912
+            buf = array.array('B', b'\x00' * 1024)
+            ifc = struct.pack('iL', buf.buffer_info()[1], buf.buffer_info()[0])
+            import ctypes
+            s2 = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            fcntl.ioctl(s2.fileno(), SIOCGIFCONF, ifc)
+            s2.close()
+        # Simpler: use /proc/net/if_inet6 or just return first non-lo from /sys
+        if sys.platform.startswith("linux"):
+            for iface in os.listdir("/sys/class/net"):
+                if iface == "lo":
+                    continue
+                try:
+                    addr = open(f"/proc/net/fib_trie").read()
+                    if ip in addr:
+                        return iface
+                except Exception:
+                    pass
+            # Last resort: first non-loopback in /sys/class/net
+            for iface in sorted(os.listdir("/sys/class/net")):
+                if iface != "lo":
+                    return iface
+        elif sys.platform == "darwin":
+            out = subprocess.check_output(["ifconfig"], text=True)
+            current = None
+            for line in out.splitlines():
+                if not line.startswith("\t") and not line.startswith(" "):
+                    current = line.split(":")[0]
+                if "inet " in line and ip in line and current and current != "lo0":
+                    return current
+    except Exception:
+        pass
+
+    raise RuntimeError("Cannot determine default interface. Please specify one explicitly.")
+
 def main() -> None:
     global _backend
 
@@ -383,13 +537,21 @@ def main() -> None:
         description="DSCP-TOP Traffic Analyzer",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("interface", help="Network interface (e.g. eth0, en7)")
+    parser.add_argument("interface", nargs="?", default=None,
+                        help="Network interface (e.g. eth0, en7). Default: interface with default gateway.")
     parser.add_argument("-i", "--interval", type=float, default=1.0,
                         metavar="SECONDS", help="Refresh interval in seconds")
     parser.add_argument("-d", "--direction",
                         choices=["in", "out", "both"], default="both",
                         help="Packet direction filter")
     args = parser.parse_args()
+
+    if args.interface is None:
+        try:
+            args.interface = _default_iface()
+            print(f"Auto-detected interface: {args.interface}")
+        except RuntimeError as e:
+            print(f"ERROR: {e}"); sys.exit(1)
 
     if args.interval <= 0:
         print("ERROR: interval must be > 0"); sys.exit(1)
@@ -438,6 +600,9 @@ def main() -> None:
 
     signal.signal(signal.SIGINT,  lambda s, f: _stop())
     signal.signal(signal.SIGTERM, lambda s, f: _stop())
+
+    global _start_time
+    _start_time = time.time()
 
     cap_t  = threading.Thread(target=cap_fn,
                                args=(args.interface, args.direction, iface_mac),
