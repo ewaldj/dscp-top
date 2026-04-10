@@ -44,7 +44,7 @@ import curses
 import signal
 from collections import defaultdict
 
-VERSION="0.41"
+VERSION="0.42"
 
 # Suppress scapy warnings before any scapy import (avoids curses corruption)
 logging.getLogger("scapy").setLevel(logging.CRITICAL)
@@ -530,7 +530,60 @@ def _default_iface() -> str:
 
     raise RuntimeError("Cannot determine default interface. Please specify one explicitly.")
 
+
+def _check_and_escalate() -> None:
+    """
+    Verify we have the privileges needed for raw packet capture.
+    Test by attempting to open the required socket/device.
+    If insufficient: re-exec via sudo, prompting for password.
+    """
+    platform = sys.platform
+
+    def _has_perms() -> bool:
+        if platform.startswith("linux"):
+            try:
+                import socket as _s
+                s = _s.socket(_s.AF_PACKET, _s.SOCK_RAW, 0)
+                s.close()
+                return True
+            except PermissionError:
+                return False
+            except Exception:
+                return True   # other error — not a permission issue
+        elif platform == "darwin":
+            # Check read access to any /dev/bpf* device
+            import glob
+            for dev in sorted(glob.glob("/dev/bpf*")):
+                try:
+                    with open(dev, "rb"):
+                        pass
+                    return True
+                except PermissionError:
+                    return False
+                except Exception:
+                    continue
+            return False   # no bpf devices found
+        return True   # unknown platform — let it proceed
+
+    if _has_perms():
+        return   # already sufficient
+
+    # Re-exec via sudo, preserving PYTHONPATH so user-installed packages are visible
+    print("Insufficient privileges for raw packet capture.")
+    print("Re-starting with sudo...")
+    try:
+        # Merge current sys.path into PYTHONPATH so sudo python3 finds same packages
+        env = os.environ.copy()
+        env["PYTHONPATH"] = ":".join(sys.path)
+        # sudo -E preserves environment; pass env explicitly for reliability
+        os.execvpe("sudo", ["sudo", "-E", sys.executable] + sys.argv, env)
+    except Exception as e:
+        print(f"ERROR: failed to escalate via sudo: {e}")
+        print(f"       Run manually: sudo {sys.executable} {' '.join(sys.argv)}")
+        sys.exit(1)
+
 def main() -> None:
+    _check_and_escalate()
     global _backend
 
     parser = argparse.ArgumentParser(
