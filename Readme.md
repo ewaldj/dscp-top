@@ -14,7 +14,7 @@
 or 
 
 ```bash
-git clone https://github.com/youruser/dscp-top.git
+git clone https://github.com/ewaldj/dscp-top.git
 cd dscp-top
 chmod +x dscp-top.py
 ```
@@ -42,13 +42,17 @@ pip install scapy
 - Configurable refresh interval (default: 1s)
 - Direction filtering: `in`, `out`, or `both`
 - All percentage and bar values are relative to the current interval (not cumulative)
+- IPv4 and IPv6
+- Tagged frames: 802.1Q, QinQ (802.1ad `0x88A8` / `0x9100`) and Cisco TrustSec / CTS metadata (`0x8909`, SGT) — in any order and combination, up to 4 stacked tags
 - Cross-platform: Linux and macOS
 - Lightweight terminal UI via `curses`
-- Reset counters at runtime with `r`
+- Reset counters at runtime with `r`, show only DSCP values with traffic with `u`
+- Interface auto-detection (interface with the default route) if none is given
+- Re-starts itself via `sudo` if privileges for raw capture are missing
 
 ### DSCP classes tracked
 
-`BE/CS0` `CS1` `AF11` `AF12` `AF13` `CS2` `AF21` `AF22` `AF23` `CS3` `AF31` `AF32` `AF33` `CS4` `AF41` `AF42` `AF43` `CS5` `EF` `CS6` `CS7` + `OTHER` for any unrecognized marking
+`BE/CS0` `CS1` `AF11` `AF12` `AF13` `CS2` `AF21` `AF22` `AF23` `CS3` `AF31` `AF32` `AF33` `CS4` `AF41` `AF42` `AF43` `CS5` `EF` `CS6` `CS7` + `UNDEFINED` (orange) for any other DSCP value
 
 ---
 
@@ -56,8 +60,8 @@ pip install scapy
 
 | Platform | Backend | Max reliable pps |
 |----------|---------|-----------------|
-| Linux | `AF_PACKET` raw socket + `SO_RCVBUF 16MB` | ~50k pps |
-| macOS | scapy `L2bpfSocket` direct `recv_raw()` | ~15k pps |
+| Linux | `AF_PACKET` raw socket + `SO_RCVBUF 16MB`, promiscuous mode | ~50k pps |
+| macOS | scapy `L2bpfSocket` direct `recv_raw()`, promiscuous mode | ~15k pps |
 
 ---
 
@@ -69,14 +73,14 @@ pip install scapy
 ## Usage
 
 ```
-sudo python3 dscp-top.py <interface> [-i SECONDS] [-d in|out|both]
+sudo python3 dscp-top.py [interface] [-i SECONDS] [-d in|out|both]
 ```
 
 ### Arguments
 
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `interface` | Network interface to capture on | required |
+| `interface` | Network interface to capture on | interface with default route |
 | `-i`, `--interval` | Refresh interval in seconds | `1.0` |
 | `-d`, `--direction` | Direction filter: `in`, `out`, `both` | `both` |
 
@@ -109,20 +113,23 @@ sudo python3 dscp-top.py en7 -i 2 -d out
 |-----|--------|
 | `q` | Quit |
 | `r` | Reset all counters |
+| `u` | Toggle used-only view (only DSCP values with traffic) |
 
 ---
 
 ## Screenshot
 
 ```
- DSCP Analyzer  iface: eth0  interval: 1.0s  direction: BOTH  backend: AF_PACKET  MAC: 88:a2:9e:32:8e:b9  16:31:57
- Total pkts:       45,231  Total bytes:       67,846,500  PPS:    6,667  Rate:   80.00 Mbit/s
+ DSCP-TOP   iface: eth0  interval: 1.0s  direction: BOTH                    uptime: 00:12:41
+ Total pkts:       45,231  Total bytes:     67,846,500  PPS:    6,667  Rate:   80.00 Mbit/s
 ──────────────────────────────────────────────────────────────────────────────────────────────
-  DSCP   Label         Pkts      Rate/1.0s        %  Bar
+  DSCP   Label             Pkts           Bytes        Rate/1.0s        %  Bar
 ──────────────────────────────────────────────────────────────────────────────────────────────
-  0      BE/CS0           0       0.00 kbit/s   0.00%  ░░░░░░░░░░░░░░░░░░░░
-  46     EF            6667      80.00 Mbit/s  99.45%  ████████████████████
-  ?      OTHER            0       0.00 kbit/s   0.00%  ░░░░░░░░░░░░░░░░░░░░
+  0      BE/CS0           1,192       1,451,860     0.44 Mbit/s     0.55%  ░░░░░░░░░░░░░░░░░░░░
+  46     EF              44,027      66,393,620    79.56 Mbit/s    99.45%  ███████████████████░
+  5      UNDEFINED           12           1,020     0.00 kbit/s     0.00%  ░░░░░░░░░░░░░░░░░░░░
+──────────────────────────────────────────────────────────────────────────────────────────────
+ 'q' quit  |  'r' reset  |  'u' used-only                       | Version 0.44  by Ewald Jeitler
 ```
 
 ---
@@ -130,8 +137,12 @@ sudo python3 dscp-top.py en7 -i 2 -d out
 ## Notes
 
 - Requires **root** / `sudo` on both Linux and macOS (raw socket access)
+- The interface is put into promiscuous mode (like `tcpdump`), so traffic on SPAN / mirror ports is counted too; on Linux the kernel removes it again when `dscp-top` exits
 - Direction filtering uses L2 (Ethernet src MAC) — requires frames with Ethernet headers
 - Only IPv4 and IPv6 packets are counted; non-IP frames are ignored
-- `OTHER` row captures any DSCP value not in the standard set above
+- 802.1Q / QinQ / CTS tags are skipped before the IP header is read; the DSCP is always taken from the IP header itself
+- On Linux, many NIC drivers strip the outer 802.1Q tag before the frame reaches `AF_PACKET` (VLAN offload); those frames are counted as untagged frames — the DSCP result is the same
+- `UNDEFINED` rows capture any DSCP value not in the standard set above
+- Minimum terminal size: 80 x 10
 
 ---

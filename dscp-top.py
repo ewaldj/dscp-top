@@ -11,9 +11,9 @@
 
 """
 DSCP-TOP Traffic Analyzer - high-performance, cross-platform
-  Linux : AF_PACKET raw socket (reliable, ~50k pps)
-  IPv4 + IPv6 supported
-  macOS : scapy L2socket + direct recv() loop  (no sniff() overhead)
+  Linux : AF_PACKET raw socket, promiscuous (reliable, ~50k pps)
+  IPv4 + IPv6 supported, also behind 802.1Q / QinQ and Cisco CTS (CMD) tags
+  macOS : scapy L2socket + direct recv() loop, promiscuous (no sniff() overhead)
 
 Direction filtering via interface MAC (L2):
   in   -> src MAC != iface MAC  (traffic received from others)
@@ -44,7 +44,7 @@ import curses
 import signal
 from collections import defaultdict
 
-VERSION="0.42"
+VERSION="0.44"
 
 # Suppress scapy warnings before any scapy import (avoids curses corruption)
 logging.getLogger("scapy").setLevel(logging.CRITICAL)
@@ -92,6 +92,9 @@ def _account(dscp: int, size: int) -> None:
 #  Backend A – Linux: AF_PACKET raw socket
 # ══════════════════════════════════════════════════════════════════════════════
 _ETH_P_ALL = 0x0003
+_SOL_PACKET            = 263   # linux/socket.h
+_PACKET_ADD_MEMBERSHIP = 1     # linux/if_packet.h
+_PACKET_MR_PROMISC     = 1
 
 
 def _get_mac_linux(iface: str) -> str:
@@ -100,26 +103,62 @@ def _get_mac_linux(iface: str) -> str:
 
 
 
+# EtherTypes of tags that sit between the MAC addresses and the IP header
+_ETH_VLAN_TAGS = (0x8100, 0x88A8, 0x9100)   # 802.1Q, 802.1ad (QinQ), legacy QinQ
+_ETH_CTS_CMD   = 0x8909                     # Cisco TrustSec metadata (CMD / SGT)
+_MAX_TAGS      = 4                          # safety limit for stacked tags
+
+
 def _dscp_from_frame(raw: bytes) -> int:
     """
     Extract DSCP from raw Ethernet frame.
-    IPv4 : EtherType 0x0800 — TOS byte at offset 15, DSCP = tos >> 2
-    IPv6 : EtherType 0x86DD — Traffic Class spans bytes 14-15:
-           TC = ((raw[14] & 0x0F) << 4) | (raw[15] >> 4)
-           DSCP = TC >> 2
-    Returns DSCP value (0-63) or -1 if not IPv4/IPv6.
+
+    Tags between the MAC addresses and the IP header are skipped, in any
+    order and combination (up to _MAX_TAGS):
+      802.1Q 0x8100 / 802.1ad 0x88A8 / 0x9100 : 4 bytes (TPID + TCI)
+      Cisco CTS/CMD 0x8909                    : 2 + 2 + len*4 bytes
+                                                (EtherType, version, length,
+                                                 options incl. SGT)
+    Then:
+      IPv4 : EtherType 0x0800 — TOS byte, DSCP = tos >> 2
+      IPv6 : EtherType 0x86DD — Traffic Class spans the first two bytes:
+             TC = ((b0 & 0x0F) << 4) | (b1 >> 4), DSCP = TC >> 2
+    Returns DSCP value (0-63) or -1 if not IPv4/IPv6 (or truncated).
     """
-    if len(raw) < 34:
+    n = len(raw)
+    off = 12                                  # position of the EtherType
+    if n < off + 2:
         return -1
-    etype = struct.unpack_from("!H", raw, 12)[0]
-    if etype == 0x0800:           # IPv4
-        return (raw[15] >> 2) & 0x3F
-    if etype == 0x86DD:           # IPv6 — need at least 54 bytes (14+40)
-        if len(raw) < 54:
+    etype = (raw[off] << 8) | raw[off + 1]
+
+    for _ in range(_MAX_TAGS):
+        if etype in _ETH_VLAN_TAGS:
+            off += 4
+        elif etype == _ETH_CTS_CMD:
+            if n < off + 4:
+                return -1
+            cmd_len = raw[off + 3]           # length in 4-byte option units
+            if cmd_len == 0:
+                return -1
+            off += 4 + cmd_len * 4
+        else:
+            break
+        if n < off + 2:
             return -1
-        tc = ((raw[14] & 0x0F) << 4) | (raw[15] >> 4)
+        etype = (raw[off] << 8) | raw[off + 1]
+
+    ip = off + 2                              # first byte of the IP header
+    if etype == 0x0800:                       # IPv4 — full 20-byte header
+        if n < ip + 20:
+            return -1
+        return (raw[ip + 1] >> 2) & 0x3F
+    if etype == 0x86DD:                       # IPv6 — full 40-byte header
+        if n < ip + 40:
+            return -1
+        tc = ((raw[ip] & 0x0F) << 4) | (raw[ip + 1] >> 4)
         return (tc >> 2) & 0x3F
     return -1
+
 
 def capture_linux(iface: str, direction: str, iface_mac: str) -> None:
     """AF_PACKET raw socket — simple, reliable, good up to ~50k pps."""
@@ -132,6 +171,12 @@ def capture_linux(iface: str, direction: str, iface_mac: str) -> None:
         # Large kernel recv buffer to reduce drops under load
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
         sock.bind((iface, _ETH_P_ALL))
+        # Promiscuous mode (like tcpdump) — needed on SPAN/mirror ports,
+        # otherwise the NIC drops unicast frames not addressed to us.
+        # Bound to the socket: the kernel removes it again on close/exit.
+        mreq = struct.pack("iHH8s", socket.if_nametoindex(iface),
+                           _PACKET_MR_PROMISC, 0, b"")
+        sock.setsockopt(_SOL_PACKET, _PACKET_ADD_MEMBERSHIP, mreq)
     except Exception as e:
         print(f"\nAF_PACKET setup failed: {e}", file=sys.stderr)
         _stop(); return
