@@ -39,14 +39,17 @@ pip install scapy
 ## Features
 
 - Live per-DSCP statistics: packet count, bitrate (kbit/s / Mbit/s), percentage
-- Configurable refresh interval (default: 1s)
+- Configurable refresh interval (default: 1s), changeable at runtime with `i`
 - Direction filtering: `in`, `out`, or `both`
-- All percentage and bar values are relative to the current interval (not cumulative)
+- All percentage and left-bar values are relative to the current interval (not cumulative)
+- Bars and `%` can be switched between **packets** and **bytes** with `b` (applies to both bars; the current unit is shown as `bars: PACKETS` / `bars: BYTES` in the header)
+- The bar splits each DSCP row into **in** (blue) and **out** (magenta) packets, proportional to the traffic direction; the remaining `░` is the unused part. In `-d in` / `-d out` mode the bar is a single color
+- A second bar (**Avg since start**) next to it shows, per DSCP value, the in / out ratio of all packets since start (or since the last reset with `r`) over the full bar width, so even a few packets of a class show whether they were received or sent (a direction with at least one packet always gets at least one cell); both bars adapt dynamically to the terminal width (also while resizing): from 103 columns on two bars are shown, each up to 100 characters wide; on narrower terminals only the current bar is shown
 - IPv4 and IPv6
 - Tagged frames: 802.1Q, QinQ (802.1ad `0x88A8` / `0x9100`) and Cisco TrustSec / CTS metadata (`0x8909`, SGT) — in any order and combination, up to 4 stacked tags
 - Cross-platform: Linux and macOS
 - Lightweight terminal UI via `curses`
-- Reset counters at runtime with `r`, show only DSCP values with traffic with `u`
+- Reset counters at runtime with `r`, change the interval with `i`, switch bars between packets/bytes with `b`, show only DSCP values with traffic with `u`
 - Interface auto-detection (interface with the default route) if none is given
 - Re-starts itself via `sudo` if privileges for raw capture are missing
 
@@ -113,6 +116,8 @@ sudo python3 dscp-top.py en7 -i 2 -d out
 |-----|--------|
 | `q` | Quit |
 | `r` | Reset all counters |
+| `b` | Switch bars and `%` between packets and bytes |
+| `i` | Change the refresh interval: type a value in seconds (min. 0.1) and press `Enter`; `Enter` on empty input or `ESC` keeps the current value |
 | `u` | Toggle used-only view (only DSCP values with traffic) |
 
 ---
@@ -120,16 +125,16 @@ sudo python3 dscp-top.py en7 -i 2 -d out
 ## Screenshot
 
 ```
- DSCP-TOP   iface: eth0  interval: 1.0s  direction: BOTH                    uptime: 00:12:41
+ DSCP-TOP   iface: eth0  interval: 1.0s  direction: BOTH  bars: PACKETS                             uptime: 00:12:41
  Total pkts:       45,231  Total bytes:     67,846,500  PPS:    6,667  Rate:   80.00 Mbit/s
-──────────────────────────────────────────────────────────────────────────────────────────────
-  DSCP   Label             Pkts           Bytes        Rate/1.0s        %  Bar
-──────────────────────────────────────────────────────────────────────────────────────────────
-  0      BE/CS0           1,192       1,451,860     0.44 Mbit/s     0.55%  ░░░░░░░░░░░░░░░░░░░░
-  46     EF              44,027      66,393,620    79.56 Mbit/s    99.45%  ███████████████████░
-  5      UNDEFINED           12           1,020     0.00 kbit/s     0.00%  ░░░░░░░░░░░░░░░░░░░░
-──────────────────────────────────────────────────────────────────────────────────────────────
- 'q' quit  |  'r' reset  |  'u' used-only                       | Version 0.44  by Ewald Jeitler
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  DSCP   Label             Pkts           Bytes        Rate/1.0s         %        █in █out          Avg since start
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  0      BE/CS0           1,192       1,451,860     0.44 Mbit/s     0.55%  ░░░░░░░░░░░░░░░░░░░░  ░░░░░░░░░░░░░░░░░░░░
+  46     EF              44,027      66,393,620    79.56 Mbit/s    99.45%  ███████████████████░  ███████████████████░
+  5      UNDEFINED           12           1,020     0.00 kbit/s     0.00%  ░░░░░░░░░░░░░░░░░░░░  ░░░░░░░░░░░░░░░░░░░░
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 'q' quit  |  'r' reset  |  'i' interval  |  'b' pkts/bytes  |  'u' used-only       | Version 0.52  by Ewald Jeitler
 ```
 
 ---
@@ -143,6 +148,8 @@ sudo python3 dscp-top.py en7 -i 2 -d out
 - 802.1Q / QinQ / CTS tags are skipped before the IP header is read; the DSCP is always taken from the IP header itself
 - On Linux, many NIC drivers strip the outer 802.1Q tag before the frame reaches `AF_PACKET` (VLAN offload); those frames are counted as untagged frames — the DSCP result is the same
 - `UNDEFINED` rows capture any DSCP value not in the standard set above
-- Minimum terminal size: 80 x 10
+- If the terminal is too low for all rows, DSCP values without traffic are hidden automatically (UNDEFINED rows with traffic are always kept); if that is still not enough, the smallest rows are replaced by a red summary line showing how many values are hidden and their share of the interval
+- The `%` column and the left bar are relative to the current interval (packets or bytes, see `b`), the `Pkts` / `Bytes` columns are cumulative since start (or reset), the right bar shows the cumulative in / out ratio per row (packets or bytes, see `b`)
+- Minimum terminal size: 85 x 10 (103 columns for the second bar)
 
 ---
